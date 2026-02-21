@@ -1,0 +1,12 @@
+{
+  "durationMs": 6000,
+  "refreshMs": 60000,
+
+  "meetingSlide": { "url": "/slides/meeting.jpg", "durationMs": 6000 },
+
+  "normalSlides": [
+    { "url": "/slides/01.jpg", "durationMs": 6000 },
+    { "url": "/slides/02.jpg", "durationMs": 6000 },
+    { "url": "/slides/03.jpg", "durationMs": 6000 }
+  ]
+}

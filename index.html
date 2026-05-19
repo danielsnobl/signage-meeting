@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-store" />
+  <title>Meeting Signage</title>
+
+  <style>
+    :root{
+      --bg:#000;
+      --fadeMs: 0; /* přechody vypnuté = nejstabilnější na TV browserech */
+    }
+    *{ box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; background: var(--bg); overflow: hidden; }
+
+    .layer{
+      position: fixed;
+      inset: 0;
+      background: var(--bg);
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
+      opacity: 0;
+      transition: opacity var(--fadeMs) linear;
+      will-change: opacity;
+    }
+    .layer.on { opacity: 1; }
+
+    /* Debug badge (volitelně). Když nechceš, smaž celý #debug */
+    #debug{
+      position: fixed;
+      left: 12px;
+      bottom: 12px;
+      padding: 8px 10px;
+      font: 12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      color: rgba(255,255,255,.85);
+      background: rgba(0,0,0,.45);
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 10px;
+      z-index: 9999;
+      user-select: none;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="front" class="layer on"></div>
+  <div id="back" class="layer"></div>
+  <div id="debug" style="display:none;">—</div>
+
+<script>
+/** =========================
+ *  CONFIG
+ * ========================= */
+const PLAYLIST_URL = "/playlist.json";
+
+// Sem vlož Apps Script Web App /exec URL:
+const STATUS_URL = "https://script.google.com/macros/s/AKfycbyHH1MGlbZ7-PF2vVWygkW50yNYwIHRqz6dAUcxDjtvD8sM8dIaI9MeecAj3XlyO52D/exec";
+
+// Debug overlay (true/false)
+const DEBUG = false;
+
+// Hard refresh stránky pro “TV browser” stabilitu (30 min)
+const HARD_REFRESH_MS = 30 * 60 * 1000;
+
+/** =========================
+ *  STATE
+ * ========================= */
+let cfg = null;
+let slides = [];
+let idx = 0;
+let slideTimer = null;
+let calTimer = null;
+let hardTimer = null;
+let isMeeting = null;
+
+const front = document.getElementById("front");
+const back  = document.getElementById("back");
+const debugEl = document.getElementById("debug");
+
+function setDebug(text){
+  if (!DEBUG) return;
+  debugEl.style.display = "block";
+  debugEl.textContent = text;
+}
+
+function stopLoop(){
+  if (slideTimer) clearTimeout(slideTimer);
+  slideTimer = null;
+}
+
+function swapLayers(){
+  // back -> front
+  front.style.backgroundImage = back.style.backgroundImage;
+  front.classList.add("on");
+  back.classList.remove("on");
+}
+
+function show(url){
+  if (!url) return;
+
+  // preload – swap až po onload, ať nikdy neblikne černá
+  const img = new Image();
+  img.onload = () => {
+    back.style.backgroundImage = `url("${url}")`;
+    back.classList.add("on");
+    front.classList.remove("on");
+    swapLayers();
+  };
+  img.onerror = () => {
+    // když se slide nepovede načíst, držíme poslední funkční
+    setDebug("IMG ERROR: " + url);
+  };
+  img.src = url;
+}
+
+function startLoop(list, defaultDurationMs){
+  stopLoop();
+  slides = (list || []).filter(x => x && x.url);
+  if (!slides.length) return;
+
+  idx = 0;
+
+  // nastav první snímek hned (aby něco bylo vidět)
+  front.style.backgroundImage = `url("${slides[0].url}")`;
+  front.classList.add("on");
+  back.classList.remove("on");
+
+  const firstDur = slides[0].durationMs ?? defaultDurationMs;
+
+  // Special case: jen 1 slide (meeting) => neswapujeme vrstvy
+  if (slides.length === 1) {
+    slideTimer = setTimeout(function tickOne(){
+      front.style.backgroundImage = `url("${slides[0].url}")`;
+      slideTimer = setTimeout(tickOne, slides[0].durationMs ?? defaultDurationMs);
+    }, firstDur);
+    return;
+  }
+
+  const tick = () => {
+    idx = (idx + 1) % slides.length;
+    show(slides[idx].url);
+    const dur = slides[idx].durationMs ?? defaultDurationMs;
+    slideTimer = setTimeout(tick, dur);
+  };
+
+  slideTimer = setTimeout(tick, firstDur);
+}
+
+function applyMode(meetingNow){
+  if (isMeeting === meetingNow && isMeeting !== null) return;
+  isMeeting = meetingNow;
+
+  const defaultDurationMs = cfg?.durationMs ?? 6000;
+  const target = isMeeting
+    ? (cfg?.meetingSlide?.url ? [cfg.meetingSlide] : [])
+    : (Array.isArray(cfg?.normalSlides) ? cfg.normalSlides : []);
+
+  if (!target.length) return;
+
+  setDebug(isMeeting ? "MODE: MEETING" : "MODE: NORMAL");
+  startLoop(target, defaultDurationMs);
+}
+
+async function calendarTick(){
+  try{
+    const res = await fetch(STATUS_URL, { cache: "no-store" });
+    if (!res.ok) {
+      setDebug("STATUS HTTP: " + res.status);
+      return;
+    }
+
+    const data = await res.json();
+    if (data.ok !== true) {
+      setDebug("STATUS ok:false");
+      return; // fail-safe: drž poslední stav
+    }
+
+    applyMode(!!data.meeting);
+  } catch(e){
+    setDebug("STATUS ERR");
+    // fail-safe: drž poslední stav
+  }
+}
+
+async function loadPlaylist(){
+  const res = await fetch(PLAYLIST_URL, { cache: "no-store" });
+  if (!res.ok) throw new Error("playlist.json load failed: " + res.status);
+  return await res.json();
+}
+
+async function boot(){
+  if (!STATUS_URL || STATUS_URL.includes("PASTE_YOUR_APPS_SCRIPT_EXEC_URL_HERE")) {
+    setDebug("ERROR: Missing STATUS_URL");
+    return;
+  }
+
+  cfg = await loadPlaylist();
+
+  // start v normal režimu a hned vyhodnoť status
+  applyMode(false);
+
+  // kalendář kontrola každých refreshMs
+  const refreshMs = cfg?.refreshMs ?? 60000;
+  await calendarTick();
+  calTimer = setInterval(calendarTick, refreshMs);
+
+  // hard refresh
+  hardTimer = setTimeout(() => location.reload(), HARD_REFRESH_MS);
+}
+
+boot();
+</script>
+</body>
+</html>
